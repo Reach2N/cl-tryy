@@ -39,9 +39,7 @@ else:
     rand_suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=4))
     WORKER_ID = f"{hostname}-{rand_suffix}"
 
-raw_interval = float(os.environ.get("REQUEST_INTERVAL", "1.8"))
-# Default to 1.8s for maximum sustained throughput without 429 rate limit pauses
-REQUEST_INTERVAL = 1.8 if raw_interval in (1.0, 2.0) else raw_interval
+REQUEST_INTERVAL = float(os.environ.get("REQUEST_INTERVAL", "2.0"))
 
 CHARACTERS = string.ascii_letters + string.digits + "-_"
 INVALID_PHRASES = [
