@@ -1,0 +1,170 @@
+import os
+import random
+import socket
+import string
+import sys
+import time
+from pathlib import Path
+
+# Load environment variables from .env if present
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except ImportError:
+    pass
+
+# pyrefly: ignore [missing-import]
+from curl_cffi import requests
+
+try:
+    from supabase import Client, create_client
+except ImportError:
+    print("Error: 'supabase' package is required. Install it using: pip install supabase")
+    sys.exit(1)
+
+# --- Configuration ---
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://kshqavwsvsyrciuhauqo.supabase.co").strip()
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "").strip()
+BASE_URL = os.environ.get("BASE_URL", "https://claude.ai/referral").strip()
+WORKER_ID = os.environ.get("WORKER_ID", "").strip() or socket.gethostname()
+REQUEST_INTERVAL = float(os.environ.get("REQUEST_INTERVAL", "2.0"))
+
+CHARACTERS = string.ascii_letters + string.digits + "-_"
+INVALID_PHRASES = [
+    "This referral link is no longer valid",
+    "referral link is no longer valid",
+    "Page not found",
+    "404",
+]
+
+
+def validate_supabase_setup():
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        print("=" * 65)
+        print("❌ Supabase configuration missing!")
+        print("Please set SUPABASE_URL and SUPABASE_KEY in your .env file or environment.")
+        print("Example:")
+        print("  SUPABASE_URL=https://your-project.supabase.co")
+        print("  SUPABASE_KEY=eyJhbGciOi...")
+        print("=" * 65)
+        sys.exit(1)
+
+    client: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+    try:
+        # Test if referral_checks table exists
+        client.table("referral_checks").select("slug").limit(1).execute()
+        print("✅ Connected to Supabase successfully.")
+    except Exception as exc:
+        print("=" * 65)
+        print("❌ Error connecting to Supabase or tables not found:")
+        print(f"   {exc}")
+        print("\nPlease execute the SQL script 'supabase_schema.sql' in your")
+        print("Supabase SQL Editor before starting the worker.")
+        print("=" * 65)
+        sys.exit(1)
+
+    return client
+
+
+def generate_slug(length=10):
+    return "".join(random.choice(CHARACTERS) for _ in range(length))
+
+
+def is_already_checked(client: Client, slug: str) -> bool:
+    """Check Supabase to skip codes checked by this or any other server."""
+    try:
+        res = client.table("referral_checks").select("slug").eq("slug", slug).limit(1).execute()
+        return len(res.data) > 0
+    except Exception as e:
+        print(f"[{WORKER_ID}] Database check error: {e}")
+        return False
+
+
+def save_check_result(client: Client, slug: str, url: str, status_code: int, is_valid: bool):
+    """Record result in Supabase with conflict handling."""
+    try:
+        client.table("referral_checks").upsert(
+            {
+                "slug": slug,
+                "url": url,
+                "status_code": status_code,
+                "is_valid": is_valid,
+                "worker_id": WORKER_ID,
+            },
+            on_conflict="slug",
+        ).execute()
+
+        if is_valid:
+            client.table("found_codes").upsert(
+                {"slug": slug, "url": url, "worker_id": WORKER_ID},
+                on_conflict="slug",
+            ).execute()
+    except Exception as e:
+        print(f"[{WORKER_ID}] Failed to save to Supabase: {e}")
+
+
+def run_worker():
+    client = validate_supabase_setup()
+
+    print(f"\n🚀 Worker ID      : {WORKER_ID}")
+    print(f"🎯 Target URL base: {BASE_URL}")
+    print(f"⏱️  Pace interval  : {REQUEST_INTERVAL}s")
+    print("📡 Connected to shared Supabase database. Press Ctrl + C to stop.\n")
+
+    # Use Chrome TLS impersonation on HTTPS; plain HTTP on localhost
+    impersonate = "chrome" if BASE_URL.startswith("https://") else None
+    session = requests.Session(impersonate=impersonate)
+    attempts = 0
+
+    while True:
+        attempts += 1
+        slug = generate_slug(10)
+
+        # Coordinate with other servers: skip if already checked
+        if is_already_checked(client, slug):
+            continue
+
+        url = f"{BASE_URL.rstrip('/')}/{slug}"
+
+        try:
+            response = session.get(url, timeout=10, allow_redirects=True)
+
+            if response.status_code == 429:
+                print(f"[{WORKER_ID} #{attempts}] Rate limited (HTTP 429). Retrying in 15s...")
+                time.sleep(15)
+                continue
+
+            if response.status_code == 403:
+                print(f"[{WORKER_ID} #{attempts}] Blocked (403): Rate limits or security challenge.")
+                save_check_result(client, slug, url, 403, False)
+
+            elif response.status_code == 200:
+                body_text = response.text
+                is_invalid = any(phrase in body_text for phrase in INVALID_PHRASES)
+
+                if is_invalid:
+                    print(f"[{WORKER_ID} #{attempts}] Invalid code: {slug}")
+                    save_check_result(client, slug, url, 200, False)
+                else:
+                    print(f"\n🎉 [{WORKER_ID}] WORKING LINK FOUND on attempt #{attempts}: {url}")
+                    save_check_result(client, slug, url, 200, True)
+                    with open("found_code.txt", "a", encoding="utf-8") as f:
+                        f.write(f"{url}\n")
+                    break
+
+            else:
+                print(f"[{WORKER_ID} #{attempts}] Status: {response.status_code} ({slug})")
+                save_check_result(client, slug, url, response.status_code, False)
+
+        except Exception as e:
+            print(f"[{WORKER_ID} #{attempts}] Network error: {e}")
+
+        time.sleep(REQUEST_INTERVAL)
+
+
+if __name__ == "__main__":
+    try:
+        run_worker()
+    except KeyboardInterrupt:
+        print(f"\nStopped by user (Worker: {WORKER_ID}).")
