@@ -163,7 +163,9 @@ case "${1:-run}" in
     stop)
         stop_worker
         ;;
-    restart)
+    restart|update)
+        echo "🔄 Pulling latest updates from GitHub..."
+        git pull --quiet 2>/dev/null || true
         stop_worker
         sleep 1
         start_worker
