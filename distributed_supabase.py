@@ -55,9 +55,21 @@ INVALID_PHRASES = [
 # Optional proxy pool configuration (proxies.txt or PROXY_URL)
 PROXIES_FILE = Path("proxies.txt")
 PROXIES = []
+
+def format_proxy(p: str) -> str:
+    p = p.strip()
+    if p.startswith("http://") or p.startswith("https://") or p.startswith("socks"):
+        return p
+    parts = p.split(":")
+    if len(parts) == 4:  # ip:port:user:pass
+        return f"http://{parts[2]}:{parts[3]}@{parts[0]}:{parts[1]}"
+    if len(parts) == 2:  # ip:port
+        return f"http://{p}"
+    return p
+
 if PROXIES_FILE.exists():
     raw_lines = PROXIES_FILE.read_text(encoding="utf-8").splitlines()
-    PROXIES = [p.strip() for p in raw_lines if p.strip() and not p.startswith("#") and not p.startswith("{")]
+    PROXIES = [format_proxy(p) for p in raw_lines if p.strip() and not p.startswith("#") and not p.startswith("{")]
     
     if PROXIES:
         # Randomly shuffle so if multiple servers download the same huge list, they use a different subset of 10!
@@ -65,7 +77,7 @@ if PROXIES_FILE.exists():
     else:
         print("⚠️ Warning: proxies.txt is empty or contains an error. Running in Direct IP mode.")
 elif os.environ.get("PROXY_URL"):
-    PROXIES = [os.environ.get("PROXY_URL").strip()]
+    PROXIES = [format_proxy(os.environ.get("PROXY_URL").strip())]
 
 # State variables
 HAS_CANDIDATE_QUEUE = False
