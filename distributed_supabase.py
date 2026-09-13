@@ -77,8 +77,10 @@ def validate_supabase_setup():
     return client
 
 
-def generate_slug(length=10):
-    return "".join(random.choice(CHARACTERS) for _ in range(length))
+def generate_slug():
+    # All verified Claude codes are canonical unpadded Base64url encodings of 7 bytes
+    # (ends strictly in A, Q, g, or w, eliminating 93.75% of impossible codes)
+    return secrets.token_urlsafe(7)
 
 
 def is_already_checked(client: Client, slug: str) -> bool:
@@ -136,9 +138,11 @@ def run_worker():
             continue
 
         url = f"{BASE_URL.rstrip('/')}/{slug}"
+        # Use Claude's direct lightweight JSON API (4 bytes vs 113,000 bytes of HTML)
+        check_url = f"https://claude.ai/api/referral/code/{slug}" if "claude.ai" in BASE_URL else url
 
         try:
-            response = session.get(url, timeout=10, allow_redirects=True)
+            response = session.get(check_url, timeout=10, allow_redirects=True)
 
             if response.status_code == 429:
                 print(f"[{WORKER_ID} #{attempts}] Rate limited (HTTP 429). Retrying in 15s...")
@@ -150,18 +154,33 @@ def run_worker():
                 save_check_result(client, slug, url, 403, False)
 
             elif response.status_code == 200:
-                body_text = response.text
-                is_invalid = any(phrase in body_text for phrase in INVALID_PHRASES)
+                is_valid = False
 
-                if is_invalid:
-                    print(f"[{WORKER_ID} #{attempts}] Invalid code: {slug}")
-                    save_check_result(client, slug, url, 200, False)
+                if "claude.ai" in BASE_URL:
+                    # Parse JSON API response
+                    try:
+                        data = response.json()
+                    except Exception:
+                        data = None
+
+                    # If data is null -> code does not exist. If is_valid == True -> jackpot!
+                    if isinstance(data, dict) and data.get("is_valid") is True:
+                        is_valid = True
                 else:
+                    # Fallback HTML checking for local mock server
+                    body_text = response.text
+                    is_invalid = any(phrase in body_text for phrase in INVALID_PHRASES)
+                    is_valid = not is_invalid
+
+                if is_valid:
                     print(f"\n🎉 [{WORKER_ID}] WORKING LINK FOUND on attempt #{attempts}: {url}")
                     save_check_result(client, slug, url, 200, True)
                     with open("found_code.txt", "a", encoding="utf-8") as f:
                         f.write(f"{url}\n")
                     break
+                else:
+                    print(f"[{WORKER_ID} #{attempts}] Invalid code: {slug}")
+                    save_check_result(client, slug, url, 200, False)
 
             else:
                 print(f"[{WORKER_ID} #{attempts}] Status: {response.status_code} ({slug})")
