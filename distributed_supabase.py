@@ -106,9 +106,9 @@ def save_check_result(client: Client, slug: str, url: str, status_code: int, is_
         ).execute()
 
         if is_valid:
-            client.table("found_codes").upsert(
+            client.table("found_codes").insert(
                 {"slug": slug, "url": url, "worker_id": WORKER_ID},
-                on_conflict="slug",
+                returning="minimal",
             ).execute()
     except Exception as e:
         print(f"[{WORKER_ID}] Failed to save to Supabase: {e}")

@@ -1,5 +1,5 @@
 -- ==============================================================================
--- Supabase Schema for Distributed Referral Checker
+-- Supabase Schema: Private Found Codes & Secure Worker Policies
 -- Run this in your Supabase SQL Editor (Dashboard -> SQL Editor -> New query)
 -- ==============================================================================
 
@@ -13,7 +13,6 @@ CREATE TABLE IF NOT EXISTS public.referral_checks (
     checked_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Index for quickly filtering valid codes and checking dates
 CREATE INDEX IF NOT EXISTS idx_referral_checks_is_valid ON public.referral_checks(is_valid);
 CREATE INDEX IF NOT EXISTS idx_referral_checks_checked_at ON public.referral_checks(checked_at DESC);
 
@@ -26,26 +25,51 @@ CREATE TABLE IF NOT EXISTS public.found_codes (
     found_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- 3. Row Level Security (RLS) Policies
--- Enables access for both 'anon' key and 'service_role' key
+-- 3. Enable Row Level Security (RLS)
 ALTER TABLE public.referral_checks ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.found_codes ENABLE ROW LEVEL SECURITY;
 
+-- Clean up existing policies
 DROP POLICY IF EXISTS "Allow all access to referral_checks" ON public.referral_checks;
-CREATE POLICY "Allow all access to referral_checks" 
-    ON public.referral_checks 
-    FOR ALL 
-    TO anon, authenticated, service_role 
-    USING (true) 
-    WITH CHECK (true);
-
 DROP POLICY IF EXISTS "Allow all access to found_codes" ON public.found_codes;
-CREATE POLICY "Allow all access to found_codes" 
+DROP POLICY IF EXISTS "Workers can insert found_codes" ON public.found_codes;
+DROP POLICY IF EXISTS "Only admin can view found_codes" ON public.found_codes;
+DROP POLICY IF EXISTS "Workers can manage referral_checks" ON public.referral_checks;
+DROP POLICY IF EXISTS "Anon cannot see valid codes in referral_checks" ON public.referral_checks;
+
+-- ==============================================================================
+-- SECURE POLICIES:
+-- 1. Found codes are 100% PRIVATE.
+--    - Workers (anon) can only INSERT into found_codes (blind drop box).
+--    - Workers or anyone with the anon key CANNOT SELECT (read) found_codes.
+--    - ONLY YOU in the Supabase Dashboard (service_role) can view found_codes.
+-- ==============================================================================
+
+CREATE POLICY "Workers can insert found_codes" 
     ON public.found_codes 
-    FOR ALL 
-    TO anon, authenticated, service_role 
-    USING (true) 
+    FOR INSERT 
+    TO anon, authenticated 
     WITH CHECK (true);
 
--- 4. Enable Realtime on found_codes (optional, allows live dashboard alerts)
-ALTER PUBLICATION supabase_realtime ADD TABLE public.found_codes;
+CREATE POLICY "Only admin can view found_codes" 
+    ON public.found_codes 
+    FOR SELECT 
+    TO service_role 
+    USING (true);
+
+-- 2. Referral checks:
+--    - Workers can insert and update referral checks.
+--    - When reading, anon can ONLY see invalid codes (is_valid = false),
+--      so even querying referral_checks will NEVER reveal working codes to the public!
+CREATE POLICY "Workers can insert and update checks"
+    ON public.referral_checks
+    FOR ALL
+    TO anon, authenticated, service_role
+    USING (true)
+    WITH CHECK (true);
+
+CREATE POLICY "Anon cannot see valid codes in referral_checks"
+    ON public.referral_checks
+    FOR SELECT
+    TO anon
+    USING (is_valid = false);
