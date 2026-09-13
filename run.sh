@@ -63,7 +63,7 @@ SUPABASE_URL="${DEFAULT_SUPABASE_URL}"
 SUPABASE_KEY="${DEFAULT_SUPABASE_KEY}"
 WORKER_ID="${DEFAULT_WORKER}"
 BASE_URL="https://claude.ai/referral"
-REQUEST_INTERVAL="2.0"
+REQUEST_INTERVAL="2.2"
 EOF
         echo "✅ Pre-configured .env with unique worker: ${DEFAULT_WORKER}"
     fi
