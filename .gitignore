@@ -11,3 +11,6 @@ found_code.txt
 *.pid
 .coordinator-token
 distributed-valid-links.txt
+.env
+.env.local
+

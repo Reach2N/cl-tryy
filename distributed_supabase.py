@@ -27,7 +27,10 @@ except ImportError:
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://kshqavwsvsyrciuhauqo.supabase.co").strip()
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "").strip()
 BASE_URL = os.environ.get("BASE_URL", "https://claude.ai/referral").strip()
-WORKER_ID = os.environ.get("WORKER_ID", "").strip() or socket.gethostname()
+configured_worker = os.environ.get("WORKER_ID", "").strip()
+hostname = socket.gethostname()
+# If WORKER_ID is unset or left as the generic default "1", use the machine's actual hostname
+WORKER_ID = configured_worker if (configured_worker and configured_worker != "1") else hostname
 REQUEST_INTERVAL = float(os.environ.get("REQUEST_INTERVAL", "2.0"))
 
 CHARACTERS = string.ascii_letters + string.digits + "-_"
