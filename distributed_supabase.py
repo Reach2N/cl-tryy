@@ -39,7 +39,9 @@ else:
     rand_suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=4))
     WORKER_ID = f"{hostname}-{rand_suffix}"
 
-REQUEST_INTERVAL = float(os.environ.get("REQUEST_INTERVAL", "1.0"))
+raw_interval = float(os.environ.get("REQUEST_INTERVAL", "1.0"))
+# Automatically upgrade old default of 2.0 from legacy .env files to 1.0s
+REQUEST_INTERVAL = 1.0 if raw_interval == 2.0 else raw_interval
 
 CHARACTERS = string.ascii_letters + string.digits + "-_"
 INVALID_PHRASES = [
@@ -128,6 +130,8 @@ def run_worker():
     # Use Chrome TLS impersonation on HTTPS; plain HTTP on localhost
     impersonate = "chrome" if BASE_URL.startswith("https://") else None
     session = requests.Session(impersonate=impersonate)
+    current_interval = REQUEST_INTERVAL
+    consecutive_success = 0
     attempts = 0
 
     while True:
@@ -141,8 +145,15 @@ def run_worker():
             response = session.get(check_url, timeout=10, allow_redirects=True)
 
             if response.status_code == 429:
-                print(f"[{WORKER_ID} #{attempts}] Rate limited (HTTP 429). Retrying in 15s...")
-                time.sleep(15)
+                retry_header = response.headers.get("Retry-After")
+                try:
+                    retry_wait = max(float(retry_header), 20.0) if retry_header else 30.0
+                except (ValueError, TypeError):
+                    retry_wait = 30.0
+                print(f"[{WORKER_ID} #{attempts}] Rate limited (HTTP 429). Cooling down {retry_wait:.0f}s...")
+                time.sleep(retry_wait)
+                current_interval = min(current_interval + 0.5, 3.0)
+                consecutive_success = 0
                 continue
 
             if response.status_code == 403:
@@ -150,6 +161,10 @@ def run_worker():
                 save_check_result(client, slug, url, 403, False)
 
             elif response.status_code == 200:
+                consecutive_success += 1
+                if consecutive_success >= 15 and current_interval > REQUEST_INTERVAL:
+                    current_interval = max(current_interval - 0.2, REQUEST_INTERVAL)
+                    consecutive_success = 0
                 is_valid = False
 
                 if "claude.ai" in BASE_URL:
@@ -185,7 +200,7 @@ def run_worker():
         except Exception as e:
             print(f"[{WORKER_ID} #{attempts}] Network error: {e}")
 
-        time.sleep(REQUEST_INTERVAL)
+        time.sleep(current_interval)
 
 
 if __name__ == "__main__":
