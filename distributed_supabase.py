@@ -108,41 +108,55 @@ def is_already_checked(client: Client, slug: str) -> bool:
         return False
 
 
-def save_check_result(client: Client, slug: str, url: str, status_code: int, is_valid: bool):
-    """Record result in Supabase with conflict handling."""
+# Optional proxy pool configuration (proxies.txt or PROXY_URL)
+PROXIES_FILE = Path("proxies.txt")
+PROXIES = []
+if PROXIES_FILE.exists():
+    PROXIES = [p.strip() for p in PROXIES_FILE.read_text(encoding="utf-8").splitlines() if p.strip() and not p.startswith("#")]
+elif os.environ.get("PROXY_URL"):
+    PROXIES = [os.environ.get("PROXY_URL").strip()]
+
+
+def save_valid_result(client: Client, slug: str, url: str):
+    """Immediately record working code in Supabase."""
     try:
         client.table("referral_checks").upsert(
             {
                 "slug": slug,
                 "url": url,
-                "status_code": status_code,
-                "is_valid": is_valid,
+                "status_code": 200,
+                "is_valid": True,
                 "worker_id": WORKER_ID,
             },
             on_conflict="slug",
         ).execute()
 
-        if is_valid:
-            client.table("found_codes").insert(
-                {"slug": slug, "url": url, "worker_id": WORKER_ID},
-                returning="minimal",
-            ).execute()
+        client.table("found_codes").insert(
+            {"slug": slug, "url": url, "worker_id": WORKER_ID},
+            returning="minimal",
+        ).execute()
     except Exception as e:
-        print(f"[{WORKER_ID}] Failed to save to Supabase: {e}")
+        print(f"[{WORKER_ID}] Failed to save jackpot to Supabase: {e}")
 
 
 def run_worker():
     client = validate_supabase_setup()
 
+    has_proxies = len(PROXIES) > 0
+    # If using rotating proxies, interval can be ultra-fast (0.3s). Otherwise 2.5s per IP.
+    base_interval = 0.3 if has_proxies else REQUEST_INTERVAL
+
     print(f"\n🚀 Worker ID      : {WORKER_ID}")
     print(f"🎯 Target URL base: {BASE_URL}")
-    print(f"⏱️  Pace interval  : {REQUEST_INTERVAL}s (adaptive auto-tuning)")
+    print(f"⏱️  Pace interval  : {base_interval}s" + (" (Proxy pool enabled: ⚡ ULTRA-FAST)" if has_proxies else " (Direct IP)"))
+    if has_proxies:
+        print(f"🛡️  Loaded {len(PROXIES)} proxies from proxies.txt")
     print("📡 Connected to shared Supabase database. Press Ctrl + C to stop.\n")
 
     # Use Chrome TLS impersonation on HTTPS; plain HTTP on localhost
     impersonate = "chrome" if BASE_URL.startswith("https://") else None
     session = requests.Session(impersonate=impersonate)
-    current_interval = REQUEST_INTERVAL
+    current_interval = base_interval
     consecutive_success = 0
     attempts = 0
 
@@ -153,8 +167,13 @@ def run_worker():
         # Use Claude's direct lightweight JSON API (4 bytes vs 113,000 bytes of HTML)
         check_url = f"https://claude.ai/api/referral/code/{slug}" if "claude.ai" in BASE_URL else url
 
+        req_kwargs = {"timeout": 10, "allow_redirects": True}
+        if has_proxies:
+            p = random.choice(PROXIES)
+            req_kwargs["proxies"] = {"http": p, "https": p}
+
         try:
-            response = session.get(check_url, timeout=10, allow_redirects=True)
+            response = session.get(check_url, **req_kwargs)
 
             if response.status_code == 429:
                 retry_header = response.headers.get("Retry-After")
@@ -164,50 +183,43 @@ def run_worker():
                     retry_wait = 30.0
                 print(f"[{WORKER_ID} #{attempts}] Rate limited (HTTP 429). Cooling down {retry_wait:.0f}s...")
                 time.sleep(retry_wait)
-                current_interval = min(current_interval + 0.2, 2.5)
+                current_interval = min(current_interval + 0.3, 3.5)
                 consecutive_success = 0
                 continue
 
             if response.status_code == 403:
-                print(f"[{WORKER_ID} #{attempts}] Blocked (403): Rate limits or security challenge.")
-                save_check_result(client, slug, url, 403, False)
+                print(f"[{WORKER_ID} #{attempts}] Blocked (403): Security challenge or IP restriction.")
 
             elif response.status_code == 200:
                 consecutive_success += 1
-                if consecutive_success >= 25 and current_interval > 1.6:
-                    current_interval = max(current_interval - 0.05, 1.6)
+                if not has_proxies and consecutive_success >= 25 and current_interval > 2.0:
+                    current_interval = max(current_interval - 0.1, 2.0)
                     consecutive_success = 0
-                is_valid = False
 
+                is_valid = False
                 if "claude.ai" in BASE_URL:
-                    # Parse JSON API response
                     try:
                         data = response.json()
                     except Exception:
                         data = None
-
-                    # If data is null -> code does not exist. If is_valid == True -> jackpot!
                     if isinstance(data, dict) and data.get("is_valid") is True:
                         is_valid = True
                 else:
-                    # Fallback HTML checking for local mock server
                     body_text = response.text
                     is_invalid = any(phrase in body_text for phrase in INVALID_PHRASES)
                     is_valid = not is_invalid
 
                 if is_valid:
                     print(f"\n🎉 [{WORKER_ID}] WORKING LINK FOUND on attempt #{attempts}: {url}")
-                    save_check_result(client, slug, url, 200, True)
+                    save_valid_result(client, slug, url)
                     with open("found_code.txt", "a", encoding="utf-8") as f:
                         f.write(f"{url}\n")
                     break
                 else:
                     print(f"[{WORKER_ID} #{attempts}] Invalid code: {slug}")
-                    save_check_result(client, slug, url, 200, False)
 
             else:
                 print(f"[{WORKER_ID} #{attempts}] Status: {response.status_code} ({slug})")
-                save_check_result(client, slug, url, response.status_code, False)
 
         except Exception as e:
             print(f"[{WORKER_ID} #{attempts}] Network error: {e}")
