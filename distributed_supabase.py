@@ -24,13 +24,20 @@ except ImportError:
     sys.exit(1)
 
 # --- Configuration ---
+DEFAULT_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImtzaHFhdndzdnN5cmNpdWhhdXFvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODkzMDMwMTAsImV4cCI6MjEwNDg3OTAxMH0.nVBB-bqG08c0xCg_HiBjw3zCVEHqCFqPQVEOT0JjLbU"
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://kshqavwsvsyrciuhauqo.supabase.co").strip()
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "").strip()
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", DEFAULT_KEY).strip()
 BASE_URL = os.environ.get("BASE_URL", "https://claude.ai/referral").strip()
+
 configured_worker = os.environ.get("WORKER_ID", "").strip()
-hostname = socket.gethostname()
-# If WORKER_ID is unset or left as the generic default "1", use the machine's actual hostname
-WORKER_ID = configured_worker if (configured_worker and configured_worker != "1") else hostname
+hostname = socket.gethostname().split(".")[0]
+# Each machine gets a unique worker identifier (e.g. ubuntu-3a9f)
+if configured_worker and configured_worker != "1":
+    WORKER_ID = configured_worker
+else:
+    rand_suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=4))
+    WORKER_ID = f"{hostname}-{rand_suffix}"
+
 REQUEST_INTERVAL = float(os.environ.get("REQUEST_INTERVAL", "2.0"))
 
 CHARACTERS = string.ascii_letters + string.digits + "-_"

@@ -8,17 +8,25 @@ cd "$SCRIPT_DIR"
 PID_FILE="$SCRIPT_DIR/.worker.pid"
 LOG_FILE="$SCRIPT_DIR/worker.log"
 DEFAULT_SUPABASE_URL="https://kshqavwsvsyrciuhauqo.supabase.co"
+DEFAULT_SUPABASE_KEY="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImtzaHFhdndzdnN5cmNpdWhhdXFvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODkzMDMwMTAsImV4cCI6MjEwNDg3OTAxMH0.nVBB-bqG08c0xCg_HiBjw3zCVEHqCFqPQVEOT0JjLbU"
 
 # -------------------------------------------------------------
 # Helper: Check and Install Environment & Dependencies
 # -------------------------------------------------------------
 setup_environment() {
+    # 0. Check & install git if missing
+    if ! command -v git &>/dev/null; then
+        echo "📦 Installing git..."
+        if command -v apt-get &>/dev/null; then
+            sudo apt-get update -qq && sudo apt-get install -y -qq git
+        fi
+    fi
+
     # 1. Check Python 3
     if ! command -v python3 &>/dev/null; then
-        echo "❌ Python 3 not found."
+        echo "❌ Python 3 not found. Installing..."
         if command -v apt-get &>/dev/null; then
-            echo "Installing Python 3..."
-            sudo apt-get update && sudo apt-get install -y python3 python3-venv python3-pip
+            sudo apt-get update -qq && sudo apt-get install -y -qq python3 python3-venv python3-pip
         else
             echo "Please install Python 3.10+ and re-run."
             exit 1
@@ -30,7 +38,7 @@ setup_environment() {
         echo "📦 Creating virtual environment (.venv)..."
         if ! python3 -m venv .venv 2>/dev/null; then
             if command -v apt-get &>/dev/null; then
-                sudo apt-get update && sudo apt-get install -y python3-venv
+                sudo apt-get update -qq && sudo apt-get install -y -qq python3-venv
                 python3 -m venv .venv
             else
                 echo "Please install python3-venv and re-run."
@@ -47,35 +55,17 @@ setup_environment() {
         touch .venv/.installed
     fi
 
-    # 4. Check or configure .env
+    # 4. Check or configure .env automatically
     if [ ! -f ".env" ] || ! grep -q "SUPABASE_KEY" .env || grep -q 'SUPABASE_KEY=""' .env; then
-        echo ""
-        echo "⚙️ First-time Supabase configuration:"
-        echo "----------------------------------------------------------"
-        echo "Your Project URL: ${DEFAULT_SUPABASE_URL}"
-        echo "Get your API key: https://supabase.com/dashboard/project/kshqavwsvsyrciuhauqo/settings/api"
-        echo ""
-        read -rp "👉 Paste your Supabase Key: " input_key
-        while [ -z "$input_key" ]; do
-            read -rp "Key cannot be empty. Paste your Supabase Key: " input_key
-        done
-
-        DEFAULT_WORKER="$(hostname)-$(date +%s | tail -c 4)"
-        read -rp "Worker Name [${DEFAULT_WORKER}]: " input_worker
-        input_worker=${input_worker:-$DEFAULT_WORKER}
-
-        read -rp "Target URL [https://claude.ai/referral]: " input_base
-        input_base=${input_base:-https://claude.ai/referral}
-
+        DEFAULT_WORKER="$(hostname | cut -d. -f1)-$(date +%s | tail -c 4)"
         cat <<EOF > .env
 SUPABASE_URL="${DEFAULT_SUPABASE_URL}"
-SUPABASE_KEY="${input_key}"
-WORKER_ID="${input_worker}"
-BASE_URL="${input_base}"
+SUPABASE_KEY="${DEFAULT_SUPABASE_KEY}"
+WORKER_ID="${DEFAULT_WORKER}"
+BASE_URL="https://claude.ai/referral"
 REQUEST_INTERVAL="2.0"
 EOF
-        echo "✅ Saved configuration to .env"
-        echo ""
+        echo "✅ Pre-configured .env with unique worker: ${DEFAULT_WORKER}"
     fi
 }
 
