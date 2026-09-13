@@ -242,7 +242,7 @@ def run_worker():
     client = validate_supabase_setup()
 
     has_proxies = len(PROXIES) > 0
-    num_threads = min(len(PROXIES), int(os.environ.get("CONCURRENCY", "10"))) if has_proxies else 1
+    num_threads = min(len(PROXIES), int(os.environ.get("CONCURRENCY", "200"))) if has_proxies else 1
     pace = PROXY_INTERVAL if has_proxies else REQUEST_INTERVAL
 
     print(f"\n🚀 Worker ID       : {WORKER_ID}")
