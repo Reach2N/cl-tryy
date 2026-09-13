@@ -73,3 +73,21 @@ CREATE POLICY "Anon cannot see valid codes in referral_checks"
     FOR SELECT
     TO anon
     USING (is_valid = false);
+
+-- 3. Candidate Queue (Optional):
+--    Drop any scraped or suspected codes here; workers will automatically
+--    prioritize checking these before generating random codes!
+CREATE TABLE IF NOT EXISTS public.candidate_queue (
+    slug TEXT PRIMARY KEY,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    claimed_by TEXT
+);
+
+ALTER TABLE public.candidate_queue ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "Allow all access to candidate_queue" ON public.candidate_queue;
+CREATE POLICY "Allow all access to candidate_queue" 
+    ON public.candidate_queue 
+    FOR ALL 
+    TO anon, authenticated, service_role 
+    USING (true) 
+    WITH CHECK (true);

@@ -39,9 +39,9 @@ else:
     rand_suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=4))
     WORKER_ID = f"{hostname}-{rand_suffix}"
 
-raw_interval = float(os.environ.get("REQUEST_INTERVAL", "1.0"))
-# Automatically upgrade old default of 2.0 from legacy .env files to 1.0s
-REQUEST_INTERVAL = 1.0 if raw_interval == 2.0 else raw_interval
+raw_interval = float(os.environ.get("REQUEST_INTERVAL", "1.8"))
+# Default to 1.8s for maximum sustained throughput without 429 rate limit pauses
+REQUEST_INTERVAL = 1.8 if raw_interval in (1.0, 2.0) else raw_interval
 
 CHARACTERS = string.ascii_letters + string.digits + "-_"
 INVALID_PHRASES = [
@@ -86,6 +86,20 @@ def generate_slug(length=None):
     return secrets.token_urlsafe(7)
 
 
+def get_next_slug(client: Client) -> str:
+    """Prioritizes candidates from Supabase candidate_queue if any exist, otherwise generates random 7-byte code."""
+    try:
+        res = client.table("candidate_queue").select("slug").is_("claimed_by", "null").limit(1).execute()
+        if res.data:
+            cand = res.data[0]["slug"].strip()
+            client.table("candidate_queue").update({"claimed_by": WORKER_ID}).eq("slug", cand).execute()
+            print(f"[{WORKER_ID}] 🎯 Checking candidate from queue: {cand}")
+            return cand
+    except Exception:
+        pass
+    return generate_slug()
+
+
 def is_already_checked(client: Client, slug: str) -> bool:
     """Check Supabase to skip codes checked by this or any other server."""
     try:
@@ -124,7 +138,7 @@ def run_worker():
 
     print(f"\n🚀 Worker ID      : {WORKER_ID}")
     print(f"🎯 Target URL base: {BASE_URL}")
-    print(f"⏱️  Pace interval  : {REQUEST_INTERVAL}s")
+    print(f"⏱️  Pace interval  : {REQUEST_INTERVAL}s (adaptive auto-tuning)")
     print("📡 Connected to shared Supabase database. Press Ctrl + C to stop.\n")
 
     # Use Chrome TLS impersonation on HTTPS; plain HTTP on localhost
@@ -136,7 +150,7 @@ def run_worker():
 
     while True:
         attempts += 1
-        slug = generate_slug()
+        slug = get_next_slug(client)
         url = f"{BASE_URL.rstrip('/')}/{slug}"
         # Use Claude's direct lightweight JSON API (4 bytes vs 113,000 bytes of HTML)
         check_url = f"https://claude.ai/api/referral/code/{slug}" if "claude.ai" in BASE_URL else url
@@ -147,12 +161,12 @@ def run_worker():
             if response.status_code == 429:
                 retry_header = response.headers.get("Retry-After")
                 try:
-                    retry_wait = max(float(retry_header), 20.0) if retry_header else 30.0
+                    retry_wait = max(float(retry_header), 25.0) if retry_header else 30.0
                 except (ValueError, TypeError):
                     retry_wait = 30.0
                 print(f"[{WORKER_ID} #{attempts}] Rate limited (HTTP 429). Cooling down {retry_wait:.0f}s...")
                 time.sleep(retry_wait)
-                current_interval = min(current_interval + 0.5, 3.0)
+                current_interval = min(current_interval + 0.2, 2.5)
                 consecutive_success = 0
                 continue
 
@@ -162,8 +176,8 @@ def run_worker():
 
             elif response.status_code == 200:
                 consecutive_success += 1
-                if consecutive_success >= 15 and current_interval > REQUEST_INTERVAL:
-                    current_interval = max(current_interval - 0.2, REQUEST_INTERVAL)
+                if consecutive_success >= 25 and current_interval > 1.6:
+                    current_interval = max(current_interval - 0.05, 1.6)
                     consecutive_success = 0
                 is_valid = False
 
