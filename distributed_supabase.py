@@ -4,6 +4,7 @@ import secrets
 import socket
 import string
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -32,14 +33,16 @@ BASE_URL = os.environ.get("BASE_URL", "https://claude.ai/referral").strip()
 
 configured_worker = os.environ.get("WORKER_ID", "").strip()
 hostname = socket.gethostname().split(".")[0]
-# Each machine gets a unique worker identifier (e.g. ubuntu-3a9f)
+# Each machine gets a unique worker identifier (e.g. macbook-3a9f)
 if configured_worker and configured_worker != "1":
     WORKER_ID = configured_worker
 else:
     rand_suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=4))
     WORKER_ID = f"{hostname}-{rand_suffix}"
 
-REQUEST_INTERVAL = float(os.environ.get("REQUEST_INTERVAL", "3.0"))
+REQUEST_INTERVAL = float(os.environ.get("REQUEST_INTERVAL", "2.5"))
+# Per-proxy interval (2.5s pace)
+PROXY_INTERVAL = float(os.environ.get("PROXY_INTERVAL", "2.5"))
 
 CHARACTERS = string.ascii_letters + string.digits + "-_"
 INVALID_PHRASES = [
@@ -49,15 +52,29 @@ INVALID_PHRASES = [
     "404",
 ]
 
+# Optional proxy pool configuration (proxies.txt or PROXY_URL)
+PROXIES_FILE = Path("proxies.txt")
+PROXIES = []
+if PROXIES_FILE.exists():
+    PROXIES = [p.strip() for p in PROXIES_FILE.read_text(encoding="utf-8").splitlines() if p.strip() and not p.startswith("#")]
+    # Randomly shuffle so if multiple servers download the same huge list, they use a different subset of 10!
+    random.shuffle(PROXIES)
+elif os.environ.get("PROXY_URL"):
+    PROXIES = [os.environ.get("PROXY_URL").strip()]
+
+# State variables
+HAS_CANDIDATE_QUEUE = False
+total_attempts = 0
+total_lock = threading.Lock()
+stop_event = threading.Event()
+
 
 def validate_supabase_setup():
+    global HAS_CANDIDATE_QUEUE
     if not SUPABASE_URL or not SUPABASE_KEY:
         print("=" * 65)
         print("❌ Supabase configuration missing!")
         print("Please set SUPABASE_URL and SUPABASE_KEY in your .env file or environment.")
-        print("Example:")
-        print("  SUPABASE_URL=https://your-project.supabase.co")
-        print("  SUPABASE_KEY=eyJhbGciOi...")
         print("=" * 65)
         sys.exit(1)
 
@@ -75,46 +92,34 @@ def validate_supabase_setup():
         print("=" * 65)
         sys.exit(1)
 
+    # Check candidate queue existence ONCE at startup to avoid hot-loop DB latency
+    try:
+        client.table("candidate_queue").select("slug").limit(1).execute()
+        HAS_CANDIDATE_QUEUE = True
+    except Exception:
+        HAS_CANDIDATE_QUEUE = False
+
     return client
 
 
-def generate_slug(length=None):
+def generate_slug():
     # All verified Claude codes are canonical unpadded Base64url encodings of 7 bytes
     # (ends strictly in A, Q, g, or w, eliminating 93.75% of impossible codes)
     return secrets.token_urlsafe(7)
 
 
 def get_next_slug(client: Client) -> str:
-    """Prioritizes candidates from Supabase candidate_queue if any exist, otherwise generates random 7-byte code."""
-    try:
-        res = client.table("candidate_queue").select("slug").is_("claimed_by", "null").limit(1).execute()
-        if res.data:
-            cand = res.data[0]["slug"].strip()
-            client.table("candidate_queue").update({"claimed_by": WORKER_ID}).eq("slug", cand).execute()
-            print(f"[{WORKER_ID}] 🎯 Checking candidate from queue: {cand}")
-            return cand
-    except Exception:
-        pass
+    """Prioritizes candidates from Supabase candidate_queue if table exists, otherwise instant in-memory generator."""
+    if HAS_CANDIDATE_QUEUE:
+        try:
+            res = client.table("candidate_queue").select("slug").is_("claimed_by", "null").limit(1).execute()
+            if res.data:
+                cand = res.data[0]["slug"].strip()
+                client.table("candidate_queue").update({"claimed_by": WORKER_ID}).eq("slug", cand).execute()
+                return cand
+        except Exception:
+            pass
     return generate_slug()
-
-
-def is_already_checked(client: Client, slug: str) -> bool:
-    """Check Supabase to skip codes checked by this or any other server."""
-    try:
-        res = client.table("referral_checks").select("slug").eq("slug", slug).limit(1).execute()
-        return len(res.data) > 0
-    except Exception as e:
-        print(f"[{WORKER_ID}] Database check error: {e}")
-        return False
-
-
-# Optional proxy pool configuration (proxies.txt or PROXY_URL)
-PROXIES_FILE = Path("proxies.txt")
-PROXIES = []
-if PROXIES_FILE.exists():
-    PROXIES = [p.strip() for p in PROXIES_FILE.read_text(encoding="utf-8").splitlines() if p.strip() and not p.startswith("#")]
-elif os.environ.get("PROXY_URL"):
-    PROXIES = [os.environ.get("PROXY_URL").strip()]
 
 
 def save_valid_result(client: Client, slug: str, url: str):
@@ -139,41 +144,25 @@ def save_valid_result(client: Client, slug: str, url: str):
         print(f"[{WORKER_ID}] Failed to save jackpot to Supabase: {e}")
 
 
-def run_worker():
-    client = validate_supabase_setup()
-
-    has_proxies = len(PROXIES) > 0
-    # If using rotating proxies, interval can be ultra-fast (0.3s). Otherwise 2.5s per IP.
-    base_interval = 0.3 if has_proxies else REQUEST_INTERVAL
-
-    print(f"\n🚀 Worker ID      : {WORKER_ID}")
-    print(f"🎯 Target URL base: {BASE_URL}")
-    print(f"⏱️  Pace interval  : {base_interval}s" + (" (Proxy pool enabled: ⚡ ULTRA-FAST)" if has_proxies else " (Direct IP)"))
-    if has_proxies:
-        print(f"🛡️  Loaded {len(PROXIES)} proxies from proxies.txt")
-    print("📡 Connected to shared Supabase database. Press Ctrl + C to stop.\n")
-
-    # Use Chrome TLS impersonation on HTTPS; plain HTTP on localhost
+def worker_thread(thread_idx: int, proxy: str | None, client: Client, pace: float):
+    global total_attempts
+    proxy_dict = {"http": proxy, "https": proxy} if proxy else None
     impersonate = "chrome" if BASE_URL.startswith("https://") else None
-    session = requests.Session(impersonate=impersonate)
-    current_interval = base_interval
-    consecutive_success = 0
-    attempts = 0
+    # Each thread keeps a persistent warm session with its own proxy
+    session = requests.Session(impersonate=impersonate, proxies=proxy_dict)
+    px_tag = f"Px-{thread_idx + 1}" if proxy else "Direct"
 
-    while True:
-        attempts += 1
+    while not stop_event.is_set():
         slug = get_next_slug(client)
         url = f"{BASE_URL.rstrip('/')}/{slug}"
-        # Use Claude's direct lightweight JSON API (4 bytes vs 113,000 bytes of HTML)
         check_url = f"https://claude.ai/api/referral/code/{slug}" if "claude.ai" in BASE_URL else url
 
-        req_kwargs = {"timeout": 10, "allow_redirects": True}
-        if has_proxies:
-            p = random.choice(PROXIES)
-            req_kwargs["proxies"] = {"http": p, "https": p}
+        with total_lock:
+            total_attempts += 1
+            att = total_attempts
 
         try:
-            response = session.get(check_url, **req_kwargs)
+            response = session.get(check_url, timeout=10, allow_redirects=True)
 
             if response.status_code == 429:
                 retry_header = response.headers.get("Retry-After")
@@ -181,21 +170,16 @@ def run_worker():
                     retry_wait = max(float(retry_header), 25.0) if retry_header else 30.0
                 except (ValueError, TypeError):
                     retry_wait = 30.0
-                print(f"[{WORKER_ID} #{attempts}] Rate limited (HTTP 429). Cooling down {retry_wait:.0f}s...")
+                print(f"[{WORKER_ID} #{att} | {px_tag}] Rate limited (HTTP 429). Proxy cooling down {retry_wait:.0f}s...")
                 time.sleep(retry_wait)
-                current_interval = min(current_interval + 0.3, 3.5)
-                consecutive_success = 0
                 continue
 
             if response.status_code == 403:
-                print(f"[{WORKER_ID} #{attempts}] Blocked (403): Security challenge or IP restriction.")
+                print(f"[{WORKER_ID} #{att} | {px_tag}] Blocked (403): Cloudflare / IP restriction.")
+                time.sleep(10.0)
+                continue
 
             elif response.status_code == 200:
-                consecutive_success += 1
-                if not has_proxies and consecutive_success >= 25 and current_interval > 2.0:
-                    current_interval = max(current_interval - 0.1, 2.0)
-                    consecutive_success = 0
-
                 is_valid = False
                 if "claude.ai" in BASE_URL:
                     try:
@@ -206,29 +190,82 @@ def run_worker():
                         is_valid = True
                 else:
                     body_text = response.text
-                    is_invalid = any(phrase in body_text for phrase in INVALID_PHRASES)
-                    is_valid = not is_invalid
+                    is_valid = not any(phrase in body_text for phrase in INVALID_PHRASES)
 
                 if is_valid:
-                    print(f"\n🎉 [{WORKER_ID}] WORKING LINK FOUND on attempt #{attempts}: {url}")
+                    print("\n" + "=" * 65)
+                    print(f"🎉 [{WORKER_ID}] WORKING LINK FOUND on attempt #{att}!")
+                    print(f"🔗 {url}")
+                    print("=" * 65 + "\n")
                     save_valid_result(client, slug, url)
                     with open("found_code.txt", "a", encoding="utf-8") as f:
                         f.write(f"{url}\n")
+                    stop_event.set()
                     break
                 else:
-                    print(f"[{WORKER_ID} #{attempts}] Invalid code: {slug}")
+                    print(f"[{WORKER_ID} #{att} | {px_tag}] Invalid code: {slug}")
 
             else:
-                print(f"[{WORKER_ID} #{attempts}] Status: {response.status_code} ({slug})")
+                print(f"[{WORKER_ID} #{att} | {px_tag}] Status: {response.status_code} ({slug})")
 
         except Exception as e:
-            print(f"[{WORKER_ID} #{attempts}] Network error: {e}")
+            print(f"[{WORKER_ID} #{att} | {px_tag}] Network error: {e}")
 
-        time.sleep(current_interval)
+        # Pace this individual thread/proxy
+        time.sleep(pace)
+
+
+def run_worker():
+    client = validate_supabase_setup()
+
+    has_proxies = len(PROXIES) > 0
+    num_threads = min(len(PROXIES), int(os.environ.get("CONCURRENCY", "10"))) if has_proxies else 1
+    pace = PROXY_INTERVAL if has_proxies else REQUEST_INTERVAL
+
+    print(f"\n🚀 Worker ID       : {WORKER_ID}")
+    print(f"🎯 Target URL base : {BASE_URL}")
+    print(f"⚡ Concurrency     : {num_threads} parallel thread(s)")
+    print(f"⏱️  Pace per worker : {pace}s")
+    if has_proxies:
+        est_rpm = (num_threads / pace) * 60
+        print(f"🛡️  Proxy pool      : {len(PROXIES)} proxies loaded (~{est_rpm:.0f} checks/min aggregate throughput)")
+    else:
+        print(f"🛡️  Direct IP mode  : Single thread, paced at {pace}s (~27 checks/min)")
+    print("📡 Connected to shared Supabase database. Press Ctrl + C to stop.\n")
+
+    threads = []
+    for i in range(num_threads):
+        proxy = PROXIES[i % len(PROXIES)] if has_proxies else None
+        t = threading.Thread(target=worker_thread, args=(i, proxy, client, pace), daemon=True)
+        t.start()
+        threads.append(t)
+
+    start_time = time.time()
+    last_attempts = 0
+    last_time = start_time
+
+    try:
+        while not stop_event.is_set():
+            time.sleep(10.0)
+            now = time.time()
+            with total_lock:
+                current_att = total_attempts
+            delta_att = current_att - last_attempts
+            delta_t = now - last_time
+            speed_sec = delta_att / delta_t if delta_t > 0 else 0
+            speed_min = speed_sec * 60
+            elapsed_min = (now - start_time) / 60
+            print(f"📊 [{WORKER_ID} Stats] Total: {current_att:,} checks | Speed: {speed_sec:.1f}/s ({speed_min:.0f}/min) | Elapsed: {elapsed_min:.1f}m")
+            last_attempts = current_att
+            last_time = now
+    except KeyboardInterrupt:
+        print(f"\nStopping worker ({WORKER_ID})...")
+        stop_event.set()
+
+    for t in threads:
+        t.join(timeout=1.0)
+    print(f"Worker {WORKER_ID} stopped.")
 
 
 if __name__ == "__main__":
-    try:
-        run_worker()
-    except KeyboardInterrupt:
-        print(f"\nStopped by user (Worker: {WORKER_ID}).")
+    run_worker()

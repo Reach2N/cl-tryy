@@ -5,6 +5,8 @@ echo "=========================================================="
 echo "    🚀 Automated Cloud Worker Installer & Launcher"
 echo "=========================================================="
 
+PROXY_URL="$1"
+
 # 1. Install git, curl, and python3 if missing
 echo "📦 Checking system packages..."
 if command -v apt-get &>/dev/null; then
@@ -33,7 +35,14 @@ else
     cd "$INSTALL_DIR"
 fi
 
-# 3. Make run.sh executable and launch/restart
+# 3. Download proxies if URL is provided
+if [ -n "$PROXY_URL" ]; then
+    echo "🌐 Downloading proxies from URL..."
+    curl -s "$PROXY_URL" > proxies.txt
+    echo "✅ Saved to proxies.txt"
+fi
+
+# 4. Make run.sh executable and launch/restart
 chmod +x run.sh
 echo "🚀 Starting worker..."
 exec ./run.sh restart
