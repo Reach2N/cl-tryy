@@ -38,7 +38,7 @@ else:
     rand_suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=4))
     WORKER_ID = f"{hostname}-{rand_suffix}"
 
-REQUEST_INTERVAL = float(os.environ.get("REQUEST_INTERVAL", "2.0"))
+REQUEST_INTERVAL = float(os.environ.get("REQUEST_INTERVAL", "1.0"))
 
 CHARACTERS = string.ascii_letters + string.digits + "-_"
 INVALID_PHRASES = [
@@ -77,7 +77,7 @@ def validate_supabase_setup():
     return client
 
 
-def generate_slug():
+def generate_slug(length=None):
     # All verified Claude codes are canonical unpadded Base64url encodings of 7 bytes
     # (ends strictly in A, Q, g, or w, eliminating 93.75% of impossible codes)
     return secrets.token_urlsafe(7)
@@ -131,12 +131,7 @@ def run_worker():
 
     while True:
         attempts += 1
-        slug = generate_slug(10)
-
-        # Coordinate with other servers: skip if already checked
-        if is_already_checked(client, slug):
-            continue
-
+        slug = generate_slug()
         url = f"{BASE_URL.rstrip('/')}/{slug}"
         # Use Claude's direct lightweight JSON API (4 bytes vs 113,000 bytes of HTML)
         check_url = f"https://claude.ai/api/referral/code/{slug}" if "claude.ai" in BASE_URL else url
