@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.py[cod]
+candidate_links.txt
+found_code.txt
+*.sqlite3
+*.sqlite3-journal
+*.sqlite3-wal
+*.sqlite3-shm
+*.log
+*.pid
+.coordinator-token
+distributed-valid-links.txt
