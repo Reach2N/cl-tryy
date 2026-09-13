@@ -56,9 +56,14 @@ INVALID_PHRASES = [
 PROXIES_FILE = Path("proxies.txt")
 PROXIES = []
 if PROXIES_FILE.exists():
-    PROXIES = [p.strip() for p in PROXIES_FILE.read_text(encoding="utf-8").splitlines() if p.strip() and not p.startswith("#")]
-    # Randomly shuffle so if multiple servers download the same huge list, they use a different subset of 10!
-    random.shuffle(PROXIES)
+    raw_lines = PROXIES_FILE.read_text(encoding="utf-8").splitlines()
+    PROXIES = [p.strip() for p in raw_lines if p.strip() and not p.startswith("#") and not p.startswith("{")]
+    
+    if PROXIES:
+        # Randomly shuffle so if multiple servers download the same huge list, they use a different subset of 10!
+        random.shuffle(PROXIES)
+    else:
+        print("⚠️ Warning: proxies.txt is empty or contains an error. Running in Direct IP mode.")
 elif os.environ.get("PROXY_URL"):
     PROXIES = [os.environ.get("PROXY_URL").strip()]
 
@@ -144,13 +149,16 @@ def save_valid_result(client: Client, slug: str, url: str):
         print(f"[{WORKER_ID}] Failed to save jackpot to Supabase: {e}")
 
 
-def worker_thread(thread_idx: int, proxy: str | None, client: Client, pace: float):
+def worker_thread(thread_idx: int, proxy: str | None, client: Client, initial_pace: float):
     global total_attempts
     proxy_dict = {"http": proxy, "https": proxy} if proxy else None
     impersonate = "chrome" if BASE_URL.startswith("https://") else None
     # Each thread keeps a persistent warm session with its own proxy
     session = requests.Session(impersonate=impersonate, proxies=proxy_dict)
     px_tag = f"Px-{thread_idx + 1}" if proxy else "Direct"
+
+    pace = initial_pace
+    consecutive_success = 0
 
     while not stop_event.is_set():
         slug = get_next_slug(client)
@@ -172,6 +180,9 @@ def worker_thread(thread_idx: int, proxy: str | None, client: Client, pace: floa
                     retry_wait = 30.0
                 print(f"[{WORKER_ID} #{att} | {px_tag}] Rate limited (HTTP 429). Proxy cooling down {retry_wait:.0f}s...")
                 time.sleep(retry_wait)
+                # Adaptive backoff: auto-tune pace to be slightly slower for this specific proxy
+                pace = min(pace + 0.4, 7.0)
+                consecutive_success = 0
                 continue
 
             if response.status_code == 403:

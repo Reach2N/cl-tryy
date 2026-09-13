@@ -39,7 +39,13 @@ fi
 if [ -n "$PROXY_URL" ]; then
     echo "🌐 Downloading proxies from URL..."
     curl -s "$PROXY_URL" > proxies.txt
-    echo "✅ Saved to proxies.txt"
+    if grep -q "{" proxies.txt; then
+        echo "❌ Error: The proxy download link returned a JSON error (likely an expired or invalid token)."
+        echo "Please generate a fresh Webshare download link and try again."
+        rm proxies.txt
+    else
+        echo "✅ Proxies downloaded successfully to proxies.txt"
+    fi
 fi
 
 # 4. Make run.sh executable and launch/restart
