@@ -33,7 +33,7 @@ else
     cd "$INSTALL_DIR"
 fi
 
-# 3. Make run.sh executable and launch
+# 3. Make run.sh executable and launch/restart
 chmod +x run.sh
 echo "🚀 Starting worker..."
-exec ./run.sh
+exec ./run.sh restart
