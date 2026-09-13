@@ -39,7 +39,7 @@ else:
     rand_suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=4))
     WORKER_ID = f"{hostname}-{rand_suffix}"
 
-REQUEST_INTERVAL = float(os.environ.get("REQUEST_INTERVAL", "2.2"))
+REQUEST_INTERVAL = float(os.environ.get("REQUEST_INTERVAL", "3.0"))
 
 CHARACTERS = string.ascii_letters + string.digits + "-_"
 INVALID_PHRASES = [
